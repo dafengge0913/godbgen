@@ -1,0 +1,13 @@
+//Auto Generate By godbgen
+package {{.PackageName}}
+
+{{if gt (len .Imports)  0 -}}
+import (
+    {{range .Imports}} "{{.}}" {{end}}
+)
+{{end}}
+type {{.ModelName}} struct {
+    {{- range .ModelFields }}
+    {{.FieldName}}    {{.FieldType}}
+    {{- end}}
+}
