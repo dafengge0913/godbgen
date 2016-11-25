@@ -1,13 +1,107 @@
 //Auto Generate By godbgen
 package {{.PackageName}}
 
-{{if gt (len .Imports)  0 -}}
 import (
+    "database/sql"
     {{range .Imports}} "{{.}}" {{end}}
 )
-{{end}}
+
 type {{.ModelName}} struct {
     {{- range .ModelFields }}
     {{.FieldName}}    {{.FieldType}}
     {{- end}}
 }
+
+{{if gt (len .NormalCols) 0 }}
+func (m *{{.ModelName}}) Insert(db *sql.DB) (*{{.ModelName}}, error) {
+    stmt, err := db.Prepare("insert into {{.TableName}}({{ range $i, $v := .UnKeyCols}}{{$v}}{{if IsNotLast $i $.UnKeyCols}}, {{end}}{{end}}) values({{PlaceHolder (len .UnKeyCols)}}) ")
+    if err != nil {
+        return nil, err
+    }
+
+    {{if .IsSetAutoIncKey}}
+    result, err := stmt.Exec({{range .UnKeyFields}}m.{{.}},{{end}})
+	if err != nil {
+		return nil, err
+	}
+	if id, err := result.LastInsertId(); err != nil {
+		return m, err
+	} else {
+	    m.{{.AutoIncKey}} = {{.AutoIncKeyType}}(id)
+		return m, err
+	}
+	{{else}}
+    _, err = stmt.Exec({{range .UnKeyFields}}m.{{.}},{{end}})
+	if err != nil {
+		return nil, err
+	}
+	{{end}}
+
+	return m, nil
+}
+
+{{if gt (len .KeyFields) 0 }}
+func (m *{{.ModelName}}) Update(db *sql.DB) (int64, error) {
+    stmt, err := db.Prepare("update {{.TableName}} set {{range $i, $v := .NormalCols}}{{$v}} = ?{{if IsNotLast $i $.NormalCols}}, {{end}} {{end -}}
+     where {{range $i, $v := .KeyCols}}{{$v}} = ? {{if IsNotLast $i $.KeyCols}}and {{end}}{{end}}")
+    if err != nil {
+        return 0, err
+    }
+    result, err := stmt.Exec({{range .NormalFields}}m.{{.}},{{end}}{{range .KeyFields}}m.{{.}},{{end}})
+    if err != nil {
+        return 0, err
+    }
+    return result.RowsAffected()
+}
+
+func (m *{{.ModelName}}) Load(db *sql.DB) (*{{.ModelName}}, error) {
+    stmt, err := db.Prepare("select * from {{.TableName}} where {{range $i, $v := .KeyCols}}{{$v}} = ? {{if IsNotLast $i $.KeyCols}}and {{end}}{{end}} ")
+    if err != nil {
+		return nil, err
+	}
+	row := stmt.QueryRow({{range .KeyFields}}m.{{.}},{{end}})
+	err = row.Scan({{range .ModelFields}}&m.{{.FieldName}},{{end}})
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (m *{{.ModelName}}) Delete(db *sql.DB) (int64, error) {
+    stmt, err := db.Prepare("delete from {{.TableName}} where {{range $i, $v := .KeyCols}}{{$v}} = ? {{if IsNotLast $i $.KeyCols}}and {{end}}{{end}} ")
+    if err != nil {
+		return 0, err
+	}
+	result, err := stmt.Exec({{range .KeyFields}}m.{{.}},{{end}})
+	if err != nil {
+        return 0, err
+    }
+    return result.RowsAffected()
+}
+
+{{end}}
+
+{{end}}
+
+func LoadAll{{.ModelName}}(db *sql.DB) ([]*{{.ModelName}}, error) {
+    stmt, err := db.Prepare("select * from {{.TableName}} ")
+    if err != nil {
+		return nil, err
+	}
+	rows, err := stmt.Query()
+	if err != nil {
+		return nil, err
+	}
+	models := make([]*{{.ModelName}}, 0)
+	for rows.Next() {
+		m := &{{.ModelName}}{}
+		err = rows.Scan({{range .ModelFields}}&m.{{.FieldName}},{{end}})
+		if err != nil {
+			return nil, err
+		}
+		models = append(models, m)
+	}
+
+	return models, nil
+}
+

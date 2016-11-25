@@ -10,6 +10,7 @@ import (
 	"go/format"
 	"html/template"
 	"os"
+	"reflect"
 	"strings"
 )
 
@@ -71,17 +72,18 @@ type tableStruct struct {
 	colName string
 	colType string
 	colKey  string
+	extra   string
 }
 
 func (g *mysqlGen) getTableStruct(db *sql.DB, tableName string) ([]*tableStruct, error) {
 	tss := make([]*tableStruct, 0)
-	if rows, err := db.Query("select column_name, column_type,column_key from information_schema.columns where table_schema = ? and table_name = ? ", g.databaseName, tableName); err != nil {
+	if rows, err := db.Query("select column_name,column_type,column_key,extra from information_schema.columns where table_schema = ? and table_name = ? ", g.databaseName, tableName); err != nil {
 		return nil, err
 	} else {
 		defer rows.Close()
 		for rows.Next() {
 			ts := &tableStruct{}
-			if err := rows.Scan(&ts.colName, &ts.colType, &ts.colKey); err != nil {
+			if err := rows.Scan(&ts.colName, &ts.colType, &ts.colKey, &ts.extra); err != nil {
 				return nil, err
 			}
 			tss = append(tss, ts)
@@ -93,39 +95,108 @@ func (g *mysqlGen) getTableStruct(db *sql.DB, tableName string) ([]*tableStruct,
 type modelField struct {
 	FieldName string
 	FieldType string
+	IsKey     bool //is primary key
+	IsAutoInc bool //is auto increment
 }
 
 func (g *mysqlGen) genModel(db *sql.DB, tableName string) error {
 	data := make(map[string]interface{})
-	modelName := camelFormat(tableName)
+	modelName := Snake2Camel(tableName)
 	data["ModelName"] = modelName
 	data["PackageName"] = g.packageName
-	tmpl, err := template.ParseFiles("tmpl/model.tmpl")
+	var fns = template.FuncMap{
+
+		"IsNotLast": func(i int, a interface{}) bool {
+			return i != reflect.ValueOf(a).Len()-1
+		},
+
+		"PlaceHolder": func(n int) string {
+
+			if n < 1 {
+				return ""
+			}
+
+			var buffer bytes.Buffer
+			for i := 0; i < n-1; i++ {
+				buffer.WriteString("?,")
+			}
+			buffer.WriteString("?")
+
+			return buffer.String()
+
+		},
+	}
+
+	tmpl := template.New("model.tmpl")
+	tmpl.Funcs(fns)
+	tmpl, err := tmpl.ParseFiles("tmpl/model.tmpl")
 	if err != nil {
 		return fmt.Errorf("open template error:%v ", err)
 	}
+
 	tss, err := g.getTableStruct(db, tableName)
 	if err != nil {
 		return err
 	}
 
 	importSet := set.NewSet()
+
 	mfs := make([]*modelField, len(tss), len(tss))
+
+	normalCols := make([]string, 0)
+	normalFields := make([]string, 0)
+	keyCols := make([]string, 0)
+	keyFields := make([]string, 0)
+	unKeyCols := make([]string, 0)
+	unKeyFields := make([]string, 0)
+
 	for i, ts := range tss {
 
-		goType := g.sqlType2GoType(ts.colType)
-		if pkg, ok := g.genImports(goType); ok {
+		fieldType := g.sqlType2GoType(ts.colType)
+		if pkg, ok := g.genImports(fieldType); ok {
 			importSet.Add(pkg)
 		}
 
-		mfs[i] = &modelField{
-			FieldName: camelFormat(ts.colName),
-			FieldType: goType,
+		colName := ts.colName
+		fieldName := Snake2Camel(colName)
+		mf := &modelField{
+			FieldName: fieldName,
+			FieldType: fieldType,
+			IsKey:     ts.colKey == "PRI",
+			IsAutoInc: ts.extra == "auto_increment",
 		}
+
+		if mf.IsAutoInc {
+			data["IsSetAutoIncKey"] = true
+			//only one auto increment column supported by mysql
+			data["AutoIncKey"] = fieldName
+			data["AutoIncKeyType"] = fieldType
+		} else {
+			unKeyCols = append(unKeyCols, colName)
+			unKeyFields = append(unKeyFields, fieldName)
+		}
+
+		if mf.IsKey {
+			keyCols = append(keyCols, colName)
+			keyFields = append(keyFields, fieldName)
+		} else {
+			normalCols = append(normalCols, colName)
+			normalFields = append(normalFields, fieldName)
+		}
+
+		mfs[i] = mf
 	}
 
+	data["TableName"] = tableName
 	data["ModelFields"] = mfs
 	data["Imports"] = importSet.List()
+	data["DaoName"] = modelName + "Dao"
+	data["NormalCols"] = normalCols
+	data["NormalFields"] = normalFields
+	data["KeyCols"] = keyCols
+	data["KeyFields"] = keyFields
+	data["UnKeyCols"] = unKeyCols
+	data["UnKeyFields"] = unKeyFields
 
 	file, err := os.OpenFile(g.outputPath+string(os.PathSeparator)+modelName+".go", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
 	if err != nil {
@@ -140,13 +211,14 @@ func (g *mysqlGen) genModel(db *sql.DB, tableName string) error {
 
 	fmtCode, err := format.Source(buf.Bytes())
 	if err != nil {
+		g.log.Error("Can not format code: %s", buf.String())
 		return fmt.Errorf("format code error:%v ", err)
 	}
 	_, err = file.Write(fmtCode)
 	return err
 }
 
-func camelFormat(name string) string {
+func Snake2Camel(name string) string {
 	words := strings.Split(name, "_")
 	result := ""
 	for _, word := range words {
@@ -156,6 +228,23 @@ func camelFormat(name string) string {
 		result += strings.ToUpper(string(word[0])) + word[1:]
 	}
 	return result
+}
+
+func Camel2Snake(name string) string {
+	var buffer bytes.Buffer
+	for i, c := range name {
+		if i == 0 {
+			buffer.WriteString(strings.ToLower(string(c)))
+			continue
+		}
+		if 'A' <= c && c <= 'Z' {
+			buffer.WriteString("_")
+			buffer.WriteString(strings.ToLower(string(c)))
+			continue
+		}
+		buffer.WriteString(string(c))
+	}
+	return buffer.String()
 }
 
 func (g *mysqlGen) sqlType2GoType(colType string) string {
